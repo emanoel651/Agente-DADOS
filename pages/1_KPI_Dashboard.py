@@ -34,21 +34,41 @@ if st.sidebar.checkbox("🔌 Testar conexão NeonDB", value=False):
 # ---------- Conexão com o Banco de Dados (APENAS secrets.toml) ----------
 @st.cache_data(ttl=600)
 def load_from_db():
-    """Lê a tabela 'vendas' usando st.connection('neondb'). Requer em secrets.toml:
-
-    [connections.neondb]
-    url = "postgresql://usuario:senha@host/neondb?sslmode=require&channel_binding=require"
-
-    OPENAI_API_KEY = "sk-..."
     """
+    1) Se houver [connections.neondb], usa st.connection.
+    2) Caso contrário, monta URL a partir das chaves flat DB_*.
+    """
+    # 1) Usar bloco [connections.neondb], se existir
+    if "connections" in st.secrets and "neondb" in st.secrets["connections"]:
+        try:
+            conn = st.connection("neondb", type="sql")
+            return conn.query("SELECT * FROM vendas", ttl=600)
+        except Exception as e:
+            st.error(f"Falha (connections.neondb): {e}")
+
+    # 2) Modo flat DB_*
     try:
-        conn = st.connection("neondb", type="sql")
-        # cache também no nível da query (ttl)
-        df = conn.query("SELECT * FROM vendas", ttl=600)
+        from sqlalchemy import create_engine
+        user = st.secrets["DB_USERNAME"]
+        pwd  = st.secrets["DB_PASSWORD"]
+        host = st.secrets["DB_HOST"]
+        port = st.secrets.get("DB_PORT", "5432")
+        db   = st.secrets["DB_DATABASE"]
+        ssl  = st.secrets.get("DB_SSLMODE", "require")
+        cb   = st.secrets.get("DB_CHANNEL_BINDING", "require")
+        extra = st.secrets.get("DB_EXTRA")  # opcional
+
+        query = extra if extra else f"sslmode={ssl}&channel_binding={cb}"
+        db_url = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}?{query}"
+
+        engine = create_engine(db_url)
+        with engine.connect() as con:
+            df = pd.read_sql("SELECT * FROM vendas", con)
         return df
     except Exception as e:
-        st.error(f"Não foi possível conectar ou carregar os dados do banco de dados: {e}")
+        st.error(f"Não foi possível conectar ou carregar os dados do banco (modo flat): {e}")
         return pd.DataFrame()
+
 
 # ---------- Helpers ----------
 def normalize_cols(df):
