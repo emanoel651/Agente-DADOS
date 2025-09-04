@@ -5,6 +5,7 @@ rapidfuzz
 openai>=1.30
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1
+psycopg2
 python-dotenv
 plotly
 
