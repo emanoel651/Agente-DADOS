@@ -8,7 +8,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
 
@@ -26,10 +25,11 @@ if st.sidebar.checkbox("🔌 Testar conexão NeonDB", value=False):
         st.error(f"Falha ao conectar: {e}")
 
 
-# ---------- Config & Env ----------
+# ---------- Config & Secrets ----------
 st.set_page_config(page_title="KPI Vendas • Análise Inteligente", layout="wide")
-load_dotenv()
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+
+# Obter a chave da API apenas do secrets.toml
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 try:
     from openai import OpenAI
