@@ -11,6 +11,21 @@ import streamlit as st
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+
+import streamlit as st
+from sqlalchemy import text
+
+if st.sidebar.checkbox("🔌 Testar conexão NeonDB", value=False):
+    try:
+        conn = st.connection("neondb", type="sql")
+        with conn.session as s:
+            v = list(s.execute(text("select version()")).fetchone())[0]
+        st.success("Conectou! 🎉")
+        st.caption(v)
+    except Exception as e:
+        st.error(f"Falha ao conectar: {e}")
+
+
 # ---------- Config & Env ----------
 st.set_page_config(page_title="KPI Vendas • Análise Inteligente", layout="wide")
 load_dotenv()
