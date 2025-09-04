@@ -111,7 +111,7 @@ def extract_pdf_info(file_bytes: bytes, filename: str) -> dict:
 # ------------------------------
 # 📂 Varredura automática de PDFs
 # ------------------------------
-ROOT_DIR = Path("projeto_streamlit_kpi\projeto_streamlit_kpi\PDFS").absolute()
+ROOT_DIR = Path("PDFS").absolute()
 ROOT_DIR.mkdir(parents=True, exist_ok=True)
 
 st.info(f"Lendo PDFs automaticamente de: **{ROOT_DIR}**. Coloque seus arquivos lá.")
