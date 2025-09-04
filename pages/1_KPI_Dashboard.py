@@ -1,5 +1,6 @@
 # pages/1_KPI_Dashboard.py
 
+import os
 import json
 from datetime import datetime
 import pandas as pd
@@ -7,63 +8,76 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sqlalchemy import create_engine
+
+
+import streamlit as st
 from sqlalchemy import text
 
-# ---------- Config ----------
-st.set_page_config(page_title="KPI Vendas • Análise Inteligente", layout="wide")
-
-# OpenAI somente via st.secrets
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else None
-try:
-    from openai import OpenAI
-    openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-except Exception:
-    openai_client = None
-
-# ---------- Teste de conexão (diagnóstico opcional) ----------
 if st.sidebar.checkbox("🔌 Testar conexão NeonDB", value=False):
     try:
-        conn = st.connection("neondb", type="sql")  # usa [connections.neondb] do secrets.toml
+        conn = st.connection("neondb", type="sql")
         with conn.session as s:
-            v = s.execute(text("select version()")).fetchone()[0]
+            v = list(s.execute(text("select version()")).fetchone())[0]
         st.success("Conectou! 🎉")
         st.caption(v)
     except Exception as e:
         st.error(f"Falha ao conectar: {e}")
 
-# ---------- Conexão com o Banco de Dados (APENAS secrets.toml) ----------
+
+# ---------- Config & Secrets ----------
+st.set_page_config(page_title="KPI Vendas • Análise Inteligente", layout="wide")
+
+# Obter a chave da API apenas do secrets.toml
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+
+try:
+    from openai import OpenAI
+
+    openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+except Exception:
+    openai_client = None
+
+
+# ---------- Conexão com o Banco de Dados ----------
 @st.cache_data(ttl=600)
 def load_from_db():
-    """Lê a tabela 'vendas' usando st.connection('neondb'). Requer em secrets.toml:
-
-    [connections.neondb]
-    url = "postgresql://usuario:senha@host/neondb?sslmode=require&channel_binding=require"
-
-    OPENAI_API_KEY = "sk-..."
-    """
     try:
-        conn = st.connection("neondb", type="sql")
-        # cache também no nível da query (ttl)
-        df = conn.query("SELECT * FROM vendas", ttl=600)
+        db_url = st.secrets["connections"]["neondb"]["url"]
+        engine = create_engine(db_url)
+        df = pd.read_sql("SELECT * FROM vendas", engine)
         return df
     except Exception as e:
-        st.error(f"Não foi possível conectar ou carregar os dados do banco de dados: {e}")
+        st.error(
+            f"Não foi possível conectar ou carregar os dados do banco de dados: {e}"
+        )
         return pd.DataFrame()
 
-# ---------- Helpers ----------
+
+# ---------- Helpers (Funções auxiliares) ----------
 def normalize_cols(df):
     colmap = {}
     for c in df.columns:
         norm = (
             c.strip()
             .lower()
-            .replace("ã", "a").replace("õ", "o").replace("ç", "c")
-            .replace("á", "a").replace("é", "e").replace("í", "i")
-            .replace("ó", "o").replace("ú", "u").replace("ê", "e")
-            .replace("â", "a").replace("ô", "o").replace(" ", "_").replace("-", "_")
+            .replace("ã", "a")
+            .replace("õ", "o")
+            .replace("ç", "c")
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+            .replace("ê", "e")
+            .replace("â", "a")
+            .replace("ô", "o")
+            .replace(" ", "_")
+            .replace("-", "_")
         )
         colmap[norm] = c
     return colmap
+
 
 def to_numeric_safe(x):
     if x is None or x == "":
@@ -81,6 +95,7 @@ def to_numeric_safe(x):
         except (ValueError, TypeError):
             return np.nan
 
+
 def coerce_date(s):
     if pd.isna(s) or s is None:
         return None
@@ -89,10 +104,12 @@ def coerce_date(s):
     except Exception:
         return None
 
+
 def top_n(df, group_cols, value_col, n=10):
     grp = df.groupby(group_cols, dropna=False, as_index=False)[value_col].sum()
     grp = grp.sort_values(value_col, ascending=False).head(n)
     return grp
+
 
 # ---------- Lógica de Negócio e IA ----------
 def calculate_momentum(df_filtered):
@@ -131,11 +148,18 @@ def calculate_momentum(df_filtered):
         mom["crescimento_abs"] / mom["vendas_anteriores"],
         np.where(mom["vendas_recentes"] > 0, 2.0, 0.0),
     )
+
+    # Limitar crescimento máximo a 100% (1.0)
     mom["crescimento_pct"] = np.minimum(mom["crescimento_pct"], 1.0)
 
-    return mom.sort_values(["crescimento_pct", "vendas_recentes"], ascending=[False, False])
+    return mom.sort_values(
+        ["crescimento_pct", "vendas_recentes"], ascending=[False, False]
+    )
 
-def openai_investment_analysis(df_momentum, total_vendas, qtd_cidades, df_top_estados, df_top_cidades):
+
+def openai_investment_analysis(
+    df_momentum, total_vendas, qtd_cidades, df_top_estados, df_top_cidades
+):
     if not openai_client or df_momentum.empty:
         return "Análise da IA não disponível. Verifique a chave da API OpenAI."
 
@@ -143,6 +167,7 @@ def openai_investment_analysis(df_momentum, total_vendas, qtd_cidades, df_top_es
     top_5_estados = df_top_estados.head(5).to_dict(orient="records")
     top_5_cidades = df_top_cidades.head(5).to_dict(orient="records")
 
+    # Formatar dados para a análise
     momentum_data = []
     for i, city in enumerate(top_10_invest, 1):
         crescimento = city["crescimento_pct"] * 100
@@ -152,44 +177,112 @@ def openai_investment_analysis(df_momentum, total_vendas, qtd_cidades, df_top_es
             f"R$ {city['vendas_recentes']:,.2f} recentes"
         )
 
-    estados_data = [f"{i}. {e['_estado']}: R$ {e['_valor']:,.2f}" for i, e in enumerate(top_5_estados, 1)]
-    cidades_data = [f"{i}. {c['_cidade']} ({c['_estado']}): R$ {c['_valor']:,.2f}" for i, c in enumerate(top_5_cidades, 1)]
+    estados_data = []
+    for i, estado in enumerate(top_5_estados, 1):
+        estados_data.append(f"{i}. {estado['_estado']}: R$ {estado['_valor']:,.2f}")
 
-    prompt = f"""Com base nos dados abaixo, gere recomendações acionáveis e um plano de 90 dias.
+    cidades_data = []
+    for i, cidade in enumerate(top_5_cidades, 1):
+        cidades_data.append(
+            f"{i}. {cidade['_cidade']} ({cidade['_estado']}): R$ {cidade['_valor']:,.2f}"
+        )
 
-**DADOS FINANCEIROS GERAIS**
+    prompt = f"""Como especialista sênior em análise de dados e estratégia empresarial com mais de 15 anos de experiência em consultoria para o setor público, forneça uma análise estratégica profundamente insightfull baseada nos dados abaixo.
+
+**CONTEXTO DA ORGANIZAÇÃO:**
+Empresa líder em capacitação de gestores públicos, focada em desenvolver instituições eficientes que impactam positivamente a sociedade. Atua com metodologia exclusiva, instrutores especializados e conteúdos sempre atualizados com a legislação.
+
+**DADOS FINANCEIROS GERAIS:**
 - Volume total analisado: R$ {total_vendas:,.2f}
 - Cidades atendidas: {qtd_cidades}
+- Período de análise: últimos 6 meses
 
-**TOP 5 ESTADOS POR VOLUME**
+**TOP 5 ESTADOS POR VOLUME:**
 {chr(10).join(estados_data)}
 
-**TOP 5 CIDADES POR VOLUME**
+**TOP 5 CIDADES POR VOLUME:**
 {chr(10).join(cidades_data)}
 
-**TOP 10 CIDADES POR MOMENTUM (CRESCIMENTO)**
+**TOP 10 CIDADES POR MOMENTUM (CRESCIMENTO):**
 {chr(10).join(momentum_data)}
-"""
+
+**INSTRUÇÕES PARA A ANÁLISE:**
+
+**🔍 ANÁLISE ESTRATÉGICA PROFUNDA:**
+1. **Padrões Ocultos & Insights Não Óbvios**
+   - Identifique correlações não aparentes entre crescimento e características regionais
+   - Analise sinergias entre territórios com performance similar
+   - Revele oportunidades de cross-selling baseadas no comportamento geográfico
+
+2. **Análise SWOT Tática**
+   - Forças: Onde estamos dominando naturalmente
+   - Fraquezas: Áreas com crescimento abaixo do potencial
+   - Oportunidades: Mercados adjacentes não explorados
+   - Ameaças: Regiões com potencial saturação
+
+3. **Segmentação Estratégica**
+   - Classifique as regiões por potencial de ROI
+   - Identifique clusters geográficos com comportamentos similares
+   - Priorize basedo em critérios múltiplos (crescimento + volume + estabilidade)
+
+**🎯 PLANO DE AÇÃO PRIORITÁRIO (90 DIAS):**
+
+**Prioridade 1: Exploração Imediata (Alto Crescimento + Alto Volume)**
+- Ações específicas para as 3 principais oportunidades
+- Metas quantitativas e prazos definidos
+- Alocação de recursos recomendada
+
+**Prioridade 2: Desenvolvimento Estratégico (Alto Potencial + Baixa Exploração)**
+- Estratégias para mercados emergentes
+- Parcerias estratégicas recomendadas
+- Investimentos em capacitação local
+
+**Prioridade 3: Consolidação (Mercados Maduros)**
+- Estratégias de retenção e aprofundamento
+- Otimização de custos and eficiência
+- Prevenção de saturação
+
+**📊 METROLOGIA DE SUCESSO:**
+- KPIs recomendados para cada iniciativa
+- Sistema de monitoramento contínuo
+- Alertas early-stage para correção de rota
+
+**💡 INSIGHTS ESPECÍFICOS POR REGIÃO:**
+Para cada área geográfica significativa, forneça:
+- Perfil comportamental único
+- Oportunidades específicas de negócio
+- Riscos particulares a monitorar
+- Estratégias customizadas
+
+**ENTREGA ESPERADA:**
+Uma análise executiva com linguagem clara, direta e acionável. Foque em insights não óbvios, oportunidades concretas e um plano de implementação imediata. Use dados específicos para embasar cada recomendação.
+
+Seja incisivo, estratégico e orientado a resultados. Evite generalidades and foque em ações específicas e mensuráveis."""
 
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Você é um analista estratégico sênior."},
+                {
+                    "role": "system",
+                    "content": "Você é um analista estratégico sênior com expertise em data science, gestão pública e desenvolvimento de negócios. Sua especialidade é transformar dados complexos em insights acionáveis e planos estratégicos concretos. Você é direto, analítico e extremamente focado em resultados mensuráveis.",
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            max_tokens=1500,
+            max_tokens=2000,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"❌ **Erro ao gerar análise da IA:** {str(e)}"
+        return f"❌ **Erro ao gerar análise da IA:** {str(e)}\n\nVerifique se a chave da API OpenAI está configurada corretamente."
 
-# ---------- Início da Interface ----------
+
+# ---------- Início da Interface Streamlit ----------
 st.sidebar.title("⚙️ Configurações")
 st.sidebar.info("Os dados são carregados automaticamente do banco de dados NeonDB.")
 
 df_raw = load_from_db()
+
 if df_raw.empty:
     st.title("KPI de Vendas")
     st.warning("Não foi possível carregar os dados.")
@@ -199,8 +292,10 @@ if df_raw.empty:
 st.sidebar.subheader("🔧 Mapeamento de Colunas")
 colmap = normalize_cols(df_raw)
 
+
 def pick_col(label, candidates):
     options_list = [None] + list(df_raw.columns)
+
     best_match = None
     for col in df_raw.columns:
         col_lower = col.lower()
@@ -210,14 +305,18 @@ def pick_col(label, candidates):
                 break
         if best_match:
             break
+
     index = options_list.index(best_match) if best_match else 0
     return st.sidebar.selectbox(label, options=options_list, index=index)
+
 
 # Seleção de colunas
 col_estado = pick_col("Coluna de Estado (UF)", ["estado", "uf", "sigla"])
 col_cidade = pick_col("Coluna de Cidade", ["cidade", "municipio", "município"])
-col_data   = pick_col("Coluna de Data", ["data", "emissao", "emissão", "pedido", "date"])
-col_valor  = pick_col("Coluna de Valor (R$)", ["valor", "total", "receita", "venda", "preço"])
+col_data = pick_col("Coluna de Data", ["data", "emissao", "emissão", "pedido", "date"])
+col_valor = pick_col(
+    "Coluna de Valor (R$)", ["valor", "total", "receita", "venda", "preço"]
+)
 
 if not all([col_estado, col_cidade, col_data, col_valor]):
     st.error("⚠️ Mapeie as quatro colunas principais na barra lateral.")
@@ -225,24 +324,40 @@ if not all([col_estado, col_cidade, col_data, col_valor]):
 
 # ---------- Preparação dos dados ----------
 df = df_raw.copy()
+
 df["_estado"] = (
-    df[col_estado].astype(str).str.strip().str.upper()
+    df[col_estado]
+    .astype(str)
+    .str.strip()
+    .str.upper()
     .replace({"NAN": None, "NONE": None, "": None, "nan": None, "None": None})
 )
 df["_cidade"] = (
-    df[col_cidade].astype(str).str.strip().str.title()
+    df[col_cidade]
+    .astype(str)
+    .str.strip()
+    .str.title()
     .replace({"NAN": None, "NONE": None, "": None, "nan": None, "None": None})
 )
-df["_data"]  = df[col_data].apply(coerce_date)
+df["_data"] = df[col_data].apply(coerce_date)
 df["_valor"] = df[col_valor].apply(to_numeric_safe)
+
 df = df.dropna(subset=["_estado", "_cidade", "_valor"])
 
 # Filtros
 st.sidebar.subheader("🔍 Filtros")
-ufs = sorted([x for x in df["_estado"].dropna().unique().tolist() if x and len(x) <= 3])
+ufs = sorted(
+    [
+        x
+        for x in df["_estado"].dropna().unique().tolist()
+        if x and x != "None" and x != "NAN" and len(x) <= 3
+    ]
+)
+
 default_ufs = ufs.copy()
 if "MG" in ufs and "MG" not in default_ufs:
     default_ufs.append("MG")
+
 uf_sel = st.sidebar.multiselect("Estados (UF)", options=ufs, default=default_ufs)
 
 anos = sorted(list({d.year for d in df["_data"].dropna() if d}))
@@ -261,27 +376,35 @@ if cidades_sel:
 
 # ---------- Título e KPIs Globais ----------
 st.title("📊 KPI de Vendas e Análise Inteligente")
+
 if df_f.empty:
     st.warning("Nenhum dado encontrado com os filtros selecionados.")
     st.stop()
 
 total_valor = float(np.nansum(df_f["_valor"]))
-qtd_reg     = int(len(df_f))
+qtd_reg = int(len(df_f))
 qtd_cidades = df_f["_cidade"].nunique()
 qtd_estados = df_f["_estado"].nunique()
 
 c1, c2, c3, c4 = st.columns(4)
-with c1: st.metric("💰 Total (R$)", f"R$ {total_valor:,.2f}")
-with c2: st.metric("🧾 Registros", f"{qtd_reg:,}")
-with c3: st.metric("🏙️ Cidades", f"{qtd_cidades:,}")
-with c4: st.metric("🗺️ Estados", f"{qtd_estados:,}")
+with c1:
+    st.metric("💰 Total (R$)", f"R$ {total_valor:,.2f}")
+with c2:
+    st.metric("🧾 Registros", f"{qtd_reg:,}")
+with c3:
+    st.metric("🏙️ Cidades", f"{qtd_cidades:,}")
+with c4:
+    st.metric("🗺️ Estados", f"{qtd_estados:,}")
 
+# Informações sobre MG
 if "MG" in df_f["_estado"].values:
-    mg_valor   = df_f[df_f["_estado"] == "MG"]["_valor"].sum()
+    mg_valor = df_f[df_f["_estado"] == "MG"]["_valor"].sum()
     mg_cidades = df_f[df_f["_estado"] == "MG"]["_cidade"].nunique()
     st.info(f"📍 **Minas Gerais (MG):** R$ {mg_valor:,.2f} em {mg_cidades} cidades")
+
+# Informações sobre RJ
 if "RJ" in df_f["_estado"].values:
-    rj_valor   = df_f[df_f["_estado"] == "RJ"]["_valor"].sum()
+    rj_valor = df_f[df_f["_estado"] == "RJ"]["_valor"].sum()
     rj_cidades = df_f[df_f["_estado"] == "RJ"]["_cidade"].nunique()
     st.info(f"📍 **Rio de Janeiro (RJ):** R$ {rj_valor:,.2f} em {rj_cidades} cidades")
 
@@ -289,17 +412,29 @@ st.divider()
 
 # ---------- Gráfico de Evolução Mensal ----------
 st.subheader("📈 Evolução Mensal das Vendas")
+
 df_evo = df_f.dropna(subset=["_data", "_valor"]).copy()
 if not df_evo.empty:
     df_evo["Ano-Mês"] = df_evo["_data"].apply(lambda d: f"{d.year}-{d.month:02d}")
-    serie = df_evo.groupby("Ano-Mês", as_index=False)["_valor"].sum().sort_values("Ano-Mês")
+    serie = (
+        df_evo.groupby("Ano-Mês", as_index=False)["_valor"].sum().sort_values("Ano-Mês")
+    )
+
     fig_evo = px.line(
-        serie, x="Ano-Mês", y="_valor", title="Evolução Mensal do Valor de Vendas (R$)",
-        markers=True, labels={"_valor": "Valor (R$)", "Ano-Mês": "Período"},
+        serie,
+        x="Ano-Mês",
+        y="_valor",
+        title="Evolução Mensal do Valor de Vendas (R$)",
+        markers=True,
+        labels={"_valor": "Valor (R$)", "Ano-Mês": "Período"},
     )
     fig_evo.update_traces(line=dict(width=3, color="#1f77b4"))
-    fig_evo.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                          font=dict(size=12), xaxis=dict(tickangle=45))
+    fig_evo.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12),
+        xaxis=dict(tickangle=45),
+    )
     fig_evo.update_xaxes(title_text="Mês/Ano")
     fig_evo.update_yaxes(title_text="Valor (R$)", tickprefix="R$ ")
     st.plotly_chart(fig_evo, use_container_width=True)
@@ -310,101 +445,248 @@ st.divider()
 
 # ---------- Gráficos Principais ----------
 st.subheader("🏆 Top 10 por Valor de Vendas")
+
+# Preparar dados para os gráficos
 top_estados = top_n(df_f, ["_estado"], "_valor", n=10)
 top_cidades = top_n(df_f, ["_cidade", "_estado"], "_valor", n=10)
 
+# Criar duas colunas para os gráficos
 col1, col2 = st.columns(2)
+
 with col1:
     st.subheader("🏙️ Top 10 Cidades")
+
     if not top_cidades.empty:
+        # Ordenar do maior para o menor
         top_cidades_display = top_cidades.sort_values("_valor", ascending=True)
         top_cidades_display["label_completa"] = (
             top_cidades_display["_cidade"] + " (" + top_cidades_display["_estado"] + ")"
         )
+
+        # Criar gráfico bonito e claro
         fig_cidades = go.Figure()
-        colors = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
-        for i, (_idx, row) in enumerate(top_cidades_display.iterrows()):
-            fig_cidades.add_trace(go.Bar(
-                y=[row["label_completa"]], x=[row["_valor"]], orientation="h",
-                name=row["_cidade"], marker_color=colors[i % len(colors)],
-                text=[f"R$ {row['_valor']:,.0f}"], textposition="auto",
-                hovertemplate=f"<b>{row['_cidade']} ({row['_estado']})</b><br>Valor: R$ {row['_valor']:,.2f}<extra></extra>",
-            ))
-        fig_cidades.update_layout(height=500, showlegend=False,
-                                  plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                                  font=dict(size=12), margin=dict(l=20,r=20,t=50,b=20),
-                                  xaxis=dict(title="Valor Total (R$)", tickprefix="R$ ", gridcolor="lightgray", zerolinecolor="lightgray"),
-                                  yaxis=dict(title="", tickfont=dict(size=11)))
+
+        # Adicionar barras com cores diferentes
+        colors = [
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+            "#17becf",
+        ]
+
+        for i, (idx, row) in enumerate(top_cidades_display.iterrows()):
+            fig_cidades.add_trace(
+                go.Bar(
+                    y=[row["label_completa"]],
+                    x=[row["_valor"]],
+                    orientation="h",
+                    name=row["_cidade"],
+                    marker_color=colors[i % len(colors)],
+                    text=[f"R$ {row['_valor']:,.0f}"],
+                    textposition="auto",
+                    hovertemplate=f"<b>{row['_cidade']} ({row['_estado']})</b><br>"
+                    + f"Valor: R$ {row['_valor']:,.2f}<extra></extra>",
+                )
+            )
+
+        # Configurar layout
+        fig_cidades.update_layout(
+            height=500,
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(size=12),
+            margin=dict(l=20, r=20, t=50, b=20),
+            xaxis=dict(
+                title="Valor Total (R$)",
+                tickprefix="R$ ",
+                gridcolor="lightgray",
+                zerolinecolor="lightgray",
+            ),
+            yaxis=dict(title="", tickfont=dict(size=11)),
+        )
+
         st.plotly_chart(fig_cidades, use_container_width=True)
+
+        # Mostrar tabela resumo
         st.markdown("**📋 Detalhes das Top 10 Cidades:**")
-        resumo_cidades = top_cidades[["_cidade","_estado","_valor"]].copy()
-        resumo_cidades.columns = ["Cidade","Estado","Valor Total (R$)"]
+        resumo_cidades = top_cidades[["_cidade", "_estado", "_valor"]].copy()
+        resumo_cidades.columns = ["Cidade", "Estado", "Valor Total (R$)"]
         resumo_cidades = resumo_cidades.sort_values("Valor Total (R$)", ascending=False)
-        resumo_cidades["Valor Total (R$)"] = resumo_cidades["Valor Total (R$)"].apply(lambda x: f"R$ {x:,.2f}")
+        resumo_cidades["Valor Total (R$)"] = resumo_cidades["Valor Total (R$)"].apply(
+            lambda x: f"R$ {x:,.2f}"
+        )
+
         st.dataframe(resumo_cidades, use_container_width=True, hide_index=True)
 
 with col2:
     st.subheader("🌎 Top 10 Estados")
+
     if not top_estados.empty:
+        # Ordenar do maior para o menor
         top_estados_display = top_estados.sort_values("_valor", ascending=True)
-        top_estados_display["percentual"] = (top_estados_display["_valor"] / total_valor * 100).round(1)
+
+        # Calcular percentual
+        top_estados_display["percentual"] = (
+            top_estados_display["_valor"] / total_valor * 100
+        ).round(1)
+
+        # Criar gráfico bonito e claro
         fig_estados = go.Figure()
-        colors = ["#ff9999","#66b3ff","#99ff99","#ffcc99","#c2c2f0","#ffb3e6","#c4e17f","#76d7ea","#ff9f80","#fec8c8"]
-        for i, (_idx, row) in enumerate(top_estados_display.iterrows()):
-            fig_estados.add_trace(go.Bar(
-                y=[row["_estado"]], x=[row["_valor"]], orientation="h",
-                name=row["_estado"], marker_color=colors[i % len(colors)],
-                text=[f"R$ {row['_valor']:,.0f}"], textposition="auto",
-                hovertemplate=f"<b>{row['_estado']}</b><br>Valor: R$ {row['_valor']:,.2f}<br>Participação: {row['percentual']}%<extra></extra>",
-            ))
-        fig_estados.update_layout(height=500, showlegend=False,
-                                  plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                                  font=dict(size=12), margin=dict(l=20,r=20,t=50,b=20),
-                                  xaxis=dict(title="Valor Total (R$)", tickprefix="R$ ", gridcolor="lightgray", zerolinecolor="lightgray"),
-                                  yaxis=dict(title="", tickfont=dict(size=11)))
+
+        # Adicionar barras com cores diferentes
+        colors = [
+            "#ff9999",
+            "#66b3ff",
+            "#99ff99",
+            "#ffcc99",
+            "#c2c2f0",
+            "#ffb3e6",
+            "#c4e17f",
+            "#76d7ea",
+            "#ff9f80",
+            "#fec8c8",
+        ]
+
+        for i, (idx, row) in enumerate(top_estados_display.iterrows()):
+            fig_estados.add_trace(
+                go.Bar(
+                    y=[row["_estado"]],
+                    x=[row["_valor"]],
+                    orientation="h",
+                    name=row["_estado"],
+                    marker_color=colors[i % len(colors)],
+                    text=[f"R$ {row['_valor']:,.0f}"],
+                    textposition="auto",
+                    hovertemplate=f"<b>{row['_estado']}</b><br>"
+                    + f"Valor: R$ {row['_valor']:,.2f}<br>"
+                    + f"Participação: {row['percentual']}%<extra></extra>",
+                )
+            )
+
+        # Configurar layout
+        fig_estados.update_layout(
+            height=500,
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(size=12),
+            margin=dict(l=20, r=20, t=50, b=20),
+            xaxis=dict(
+                title="Valor Total (R$)",
+                tickprefix="R$ ",
+                gridcolor="lightgray",
+                zerolinecolor="lightgray",
+            ),
+            yaxis=dict(title="", tickfont=dict(size=11)),
+        )
+
         st.plotly_chart(fig_estados, use_container_width=True)
+
+        # Mostrar tabela resumo
         resumo_estados = top_estados.copy()
-        resumo_estados["percentual"] = (resumo_estados["_valor"] / total_valor * 100).round(1)
-        resumo_estados = resumo_estados[["_estado","_valor","percentual"]]
-        resumo_estados.columns = ["Estado","Valor Total (R$)","Participação (%)"]
+        resumo_estados["percentual"] = (
+            resumo_estados["_valor"] / total_valor * 100
+        ).round(1)
+        resumo_estados = resumo_estados[["_estado", "_valor", "percentual"]]
+        resumo_estados.columns = ["Estado", "Valor Total (R$)", "Participação (%)"]
         resumo_estados = resumo_estados.sort_values("Valor Total (R$)", ascending=False)
-        resumo_estados["Valor Total (R$)"] = resumo_estados["Valor Total (R$)"].apply(lambda x: f"R$ {x:,.2f}")
-        resumo_estados["Participação (%)"] = resumo_estados["Participação (%)"].apply(lambda x: f"{x}%")
+        resumo_estados["Valor Total (R$)"] = resumo_estados["Valor Total (R$)"].apply(
+            lambda x: f"R$ {x:,.2f}"
+        )
+        resumo_estados["Participação (%)"] = resumo_estados["Participação (%)"].apply(
+            lambda x: f"{x}%"
+        )
+
         st.dataframe(resumo_estados, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # ---------- Análise de Oportunidades com IA ----------
 st.subheader("🚀 Análise de Oportunidades com IA")
+
 with st.spinner("Calculando momentum e gerando análise da IA..."):
     df_momentum = calculate_momentum(df_f)
+
     if df_momentum.empty:
-        st.warning("Não há dados suficientes para calcular o crescimento recente das cidades.")
+        st.warning(
+            "Não há dados suficientes para calcular o crescimento recente das cidades."
+        )
     else:
         st.subheader("📊 Top 10 Cidades para Investir (Baseado em Crescimento)")
+
         df_plot = df_momentum.head(10).copy()
         df_plot["crescimento_pct_display"] = df_plot["crescimento_pct"] * 100
         df_plot["cidade_estado"] = df_plot["_cidade"] + "/" + df_plot["_estado"]
+
+        # Ordenar do maior crescimento para o menor
         df_plot = df_plot.sort_values("crescimento_pct_display", ascending=True)
+
+        # Criar gráfico de crescimento
         fig_crescimento = go.Figure()
-        colors = ["#ff6b6b","#4ecdc4","#45b7d1","#f9ca24","#6c5ce7","#a29bfe","#fd79a8","#e17055","#00b894","#00cec9"]
-        for i, (_idx, row) in enumerate(df_plot.iterrows()):
-            fig_crescimento.add_trace(go.Bar(
-                y=[row["cidade_estado"]], x=[row["crescimento_pct_display"]],
-                orientation="h", name=row["_cidade"], marker_color=colors[i % len(colors)],
-                text=[f"{row['crescimento_pct_display']:.1f}%"], textposition="auto",
-                hovertemplate=f"<b>{row['_cidade']} ({row['_estado']})</b><br>Crescimento: {row['crescimento_pct_display']:.1f}%<br>Vendas Recentes: R$ {row['vendas_recentes']:,.2f}<extra></extra>",
-            ))
-        fig_crescimento.update_layout(height=500, showlegend=False,
-                                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                                      font=dict(size=12), margin=dict(l=20,r=20,t=50,b=20),
-                                      xaxis=dict(title="Crescimento (%)", ticksuffix="%", gridcolor="lightgray",
-                                                 zerolinecolor="lightgray", range=[0, 100]),
-                                      yaxis=dict(title="", tickfont=dict(size=11)))
+
+        colors = [
+            "#ff6b6b",
+            "#4ecdc4",
+            "#45b7d1",
+            "#f9ca24",
+            "#6c5ce7",
+            "#a29bfe",
+            "#fd79a8",
+            "#e17055",
+            "#00b894",
+            "#00cec9",
+        ]
+
+        for i, (idx, row) in enumerate(df_plot.iterrows()):
+            fig_crescimento.add_trace(
+                go.Bar(
+                    y=[row["cidade_estado"]],
+                    x=[row["crescimento_pct_display"]],
+                    orientation="h",
+                    name=row["_cidade"],
+                    marker_color=colors[i % len(colors)],
+                    text=[f"{row['crescimento_pct_display']:.1f}%"],
+                    textposition="auto",
+                    hovertemplate=f"<b>{row['_cidade']} ({row['_estado']})</b><br>"
+                    + f"Crescimento: {row['crescimento_pct_display']:.1f}%<br>"
+                    + f"Vendas Recentes: R$ {row['vendas_recentes']:,.2f}<extra></extra>",
+                )
+            )
+
+        fig_crescimento.update_layout(
+            height=500,
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(size=12),
+            margin=dict(l=20, r=20, t=50, b=20),
+            xaxis=dict(
+                title="Crescimento (%)",
+                ticksuffix="%",
+                gridcolor="lightgray",
+                zerolinecolor="lightgray",
+                range=[0, 100],  # Limitar eixo X até 100%
+            ),
+            yaxis=dict(title="", tickfont=dict(size=11)),
+        )
+
         st.plotly_chart(fig_crescimento, use_container_width=True)
-        st.info("📌 Crescimento dos últimos 3 meses vs. 3 meses anteriores (limitado a 100%)")
+
+        st.info(
+            "📌 Crescimento dos últimos 3 meses vs. 3 meses anteriores (limitado a 100%)"
+        )
+
         st.subheader("🤖 Análise Estratégica da IA")
-        analysis = openai_investment_analysis(df_momentum, total_valor, qtd_cidades, top_estados, top_cidades)
+        analysis = openai_investment_analysis(
+            df_momentum, total_valor, qtd_cidades, top_estados, top_cidades
+        )
         st.markdown(analysis)
 
 st.divider()
@@ -412,23 +694,36 @@ st.divider()
 # ---------- Tabela das 200 cidades de MG ----------
 st.subheader("🏅 Top 200 Cidades de Minas Gerais (MG)")
 df_mg = df_f[df_f["_estado"] == "MG"].copy()
+
 if df_mg.empty:
     st.warning("Não há dados de Minas Gerais para o filtro selecionado.")
 else:
     top_mg = (
-        df_mg.groupby("_cidade", as_index=False)["_valor"].sum()
+        df_mg.groupby("_cidade", as_index=False)["_valor"]
+        .sum()
         .rename(columns={"_cidade": "Cidade", "_valor": "Valor (R$)"})
-        .sort_values("Valor (R$)", ascending=False).head(200)
+        .sort_values("Valor (R$)", ascending=False)
+        .head(200)  # Mostrar top 200 cidades
     )
+
     total_cidades_mg = df_mg["_cidade"].nunique()
     total_mg = top_mg["Valor (R$)"].sum()
-    st.info(f"📍 Mostrando {len(top_mg)} de {total_cidades_mg} cidades de MG - Total: R$ {total_mg:,.2f}")
+
+    st.info(
+        f"📍 Mostrando {len(top_mg)} de {total_cidades_mg} cidades de MG - Total: R$ {total_mg:,.2f}"
+    )
+
+    # Formatar a tabela
     top_mg_display = top_mg.copy()
     top_mg_display["Ranking"] = range(1, len(top_mg_display) + 1)
-    top_mg_display["Participação (%)"] = (top_mg_display["Valor (R$)"] / total_mg * 100).round(2)
+    top_mg_display["Participação (%)"] = (
+        top_mg_display["Valor (R$)"] / total_mg * 100
+    ).round(2)
+
     st.dataframe(
-        top_mg_display[["Ranking","Cidade","Valor (R$)","Participação (%)"]],
-        use_container_width=True, height=600,
+        top_mg_display[["Ranking", "Cidade", "Valor (R$)", "Participação (%)"]],
+        use_container_width=True,
+        height=600,
         column_config={
             "Ranking": st.column_config.NumberColumn(width="small"),
             "Cidade": st.column_config.TextColumn(width="medium"),
@@ -439,28 +734,49 @@ else:
 
 st.divider()
 
-# ---------- Tabela das vendas do RJ ----------
+# ---------- Tabela das vendas do RJ (registros individuais) ----------
 st.subheader("🌊 Vendas do Rio de Janeiro (RJ) - Registros Individuais")
 df_rj = df_f[df_f["_estado"] == "RJ"].copy()
+
 if df_rj.empty:
     st.warning("Não há dados do Rio de Janeiro para o filtro selecionado.")
 else:
+    # Mostrar todos os registros individuais do RJ
     total_rj = df_rj["_valor"].sum()
     total_registros_rj = len(df_rj)
-    st.info(f"📍 {total_registros_rj} registros de vendas no RJ - Total: R$ {total_rj:,.2f}")
+
+    st.info(
+        f"📍 {total_registros_rj} registros de vendas no RJ - Total: R$ {total_rj:,.2f}"
+    )
+
+    # Adicionar filtro por cidade do RJ
     cidades_rj = sorted(df_rj["_cidade"].unique().tolist())
-    cidade_rj_sel = st.selectbox("Filtrar por cidade do RJ:", options=["Todas"] + cidades_rj, index=0)
-    df_rj_filtrado = df_rj if cidade_rj_sel == "Todas" else df_rj[df_rj["_cidade"] == cidade_rj_sel].copy()
-    rj_display = df_rj_filtrado[["_data","_cidade","_valor"]].copy()
-    rj_display.columns = ["Data","Cidade","Valor (R$)"]
-    rj_display = rj_display.sort_values(["Cidade","Data"], ascending=[True, False])
+    cidade_rj_sel = st.selectbox(
+        "Filtrar por cidade do RJ:", options=["Todas"] + cidades_rj, index=0
+    )
+
+    # Aplicar filtro se selecionado
+    if cidade_rj_sel != "Todas":
+        df_rj_filtrado = df_rj[df_rj["_cidade"] == cidade_rj_sel].copy()
+    else:
+        df_rj_filtrado = df_rj.copy()
+
+    # Preparar dados para exibição
+    rj_display = df_rj_filtrado[["_data", "_cidade", "_valor"]].copy()
+    rj_display.columns = ["Data", "Cidade", "Valor (R$)"]
+    rj_display = rj_display.sort_values(["Cidade", "Data"], ascending=[True, False])
     rj_display["Data"] = rj_display["Data"].astype(str)
     rj_display["Valor (R$)"] = rj_display["Valor (R$)"].apply(lambda x: f"R$ {x:,.2f}")
+
+    # Adicionar número de linha como ranking
     rj_display.reset_index(drop=True, inplace=True)
     rj_display.index = rj_display.index + 1
     rj_display.index.name = "Registro"
+
     st.dataframe(
-        rj_display, use_container_width=True, height=400,
+        rj_display,
+        use_container_width=True,
+        height=400,
         column_config={
             "Registro": st.column_config.NumberColumn(width="small"),
             "Data": st.column_config.TextColumn(width="medium"),
@@ -468,6 +784,8 @@ else:
             "Valor (R$)": st.column_config.TextColumn(width="medium"),
         },
     )
+
+    # Mostrar estatísticas do filtro
     if cidade_rj_sel != "Todas":
         st.write(f"**Filtrado por:** {cidade_rj_sel}")
         st.write(f"**Registros encontrados:** {len(df_rj_filtrado)}")
