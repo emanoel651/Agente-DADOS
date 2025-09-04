@@ -1,10 +1,8 @@
-streamlit
+streamlit>=1.38
 pandas
-plotly
-openai
+pypdf
+rapidfuzz
+openai>=1.30
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
 python-dotenv
-
-pdfplumber
-openpyxl
-psycopg2-binary
-SQLAlchemy
